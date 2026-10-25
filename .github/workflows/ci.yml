@@ -1,0 +1,78 @@
+name: NeuralOps verification
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:eee6c6e1b0894fa4fe0075eb054af9fd1cf39a35321c2d4110626cfe506411fb
+        env:
+          # Disposable CI database, published only on runner loopback; never use trust in deployment.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: neuralops
+          POSTGRES_DB: neuralops
+        ports: ['127.0.0.1:15432:5432']
+        options: --health-cmd 'pg_isready -U neuralops -d neuralops' --health-interval 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://neuralops@127.0.0.1:15432/neuralops
+      TEST_DATABASE_URL: postgresql+psycopg://neuralops@127.0.0.1:15432/neuralops_test
+      DEV_AUTH: 'true'
+      ENVIRONMENT: development
+      PUBLIC_ORIGIN: http://localhost:3000
+      API_INTERNAL_URL: http://127.0.0.1:8000
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: '0.12.2'
+          python-version: '3.12'
+      - name: Generate isolated session secret
+        run: |
+          python - <<'PY'
+          import os, secrets
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('SESSION_SECRET=' + secrets.token_urlsafe(48) + '\n')
+          PY
+      - run: uv sync --directory services --frozen
+      - run: npm ci --prefix web
+      - name: Backend, database isolation, OIDC and migration tests
+        run: |
+          uv run --directory services ruff check neuralops tests migrations
+          uv run --directory services pytest -q
+          uv run --directory services bandit -r neuralops -ll
+          uv run --directory services pip-audit --local
+          uv run --directory services python ../scripts/scan-secrets.py
+      - name: Contract parity, frontend checks and browser build
+        run: |
+          npm run contracts --prefix web
+          git diff --exit-code -- packages/contracts/openapi.json web/lib/generated.ts
+          npm run lint --prefix web
+          npm run typecheck --prefix web
+          npm audit --prefix web --audit-level=low
+          npm run build --prefix web
+          python scripts/check-secrets.py
+      - name: Start isolated application
+        run: |
+          uv run --directory services alembic upgrade head
+          python3 scripts/dev.py --no-setup --production-web > /tmp/neuralops-ci.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:3000/login > /dev/null && curl --fail --silent http://localhost:8000/health/ready > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Browser flow, accessibility and six responsive sizes
+        working-directory: web
+        run: |
+          npx playwright install --with-deps chromium
+          export CHROME_PATH="$(node -p 'require("@playwright/test").chromium.executablePath()')"
+          npm run test:e2e
+      # No raw browser traces or credential-page screenshots are uploaded.

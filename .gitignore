@@ -1,0 +1,48 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+.venv*/
+env/
+venv/
+
+# Node & Frontend
+node_modules/
+.next/
+dist/
+build/
+*.tsbuildinfo
+
+# Testing & E2E Reports
+playwright-report/
+test-results/
+coverage/
+
+# Local QA Artifacts & Tool Caches
+artifacts/
+graphify-out/
+
+# Logs & Databases
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

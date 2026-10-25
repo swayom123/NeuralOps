@@ -1,0 +1,80 @@
+name: neuralops
+# Development topology only: loopback ports, generated secrets, no external actions.
+# Production uses dedicated per-service DB LOGIN accounts granted infra/runtime-roles.sql roles.
+x-runtime: &runtime
+  image: neuralops-services:local
+  build: ./services
+  env_file: .env
+  environment: &runtime-env
+    DATABASE_URL: postgresql+psycopg://neuralops:${POSTGRES_PASSWORD}@postgres:5432/neuralops
+  security_opt: ['no-new-privileges:true']
+  cap_drop: ['ALL']
+  read_only: true
+  tmpfs: ['/tmp:rw,noexec,nosuid,size=64m']
+  mem_limit: 512m
+  depends_on:
+    migrate: {condition: service_completed_successfully}
+services:
+  postgres:
+    image: neuralops-postgres:local
+    build:
+      context: .
+      dockerfile: infra/postgres.Dockerfile
+    environment:
+      POSTGRES_USER: neuralops
+      POSTGRES_DB: neuralops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/setup-local.py}
+    ports: ['127.0.0.1:15432:5432']
+    volumes: ['postgres-data:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U neuralops -d neuralops']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    security_opt: ['no-new-privileges:true']
+  migrate:
+    image: neuralops-services:local
+    build: ./services
+    env_file: .env
+    environment:
+      <<: *runtime-env
+      NEURALOPS_RUNTIME: migration
+    command: ['/app/.venv/bin/alembic', 'upgrade', 'head']
+    security_opt: ['no-new-privileges:true']
+    cap_drop: ['ALL']
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    <<: *runtime
+    environment:
+      <<: *runtime-env
+      NEURALOPS_RUNTIME: api
+    command: ['/app/.venv/bin/uvicorn', 'neuralops.api:app', '--host', '0.0.0.0', '--port', '8000', '--no-access-log', '--limit-concurrency', '64']
+    ports: ['127.0.0.1:8000:8000']
+  worker:
+    <<: *runtime
+    environment:
+      <<: *runtime-env
+      NEURALOPS_RUNTIME: worker
+    command: ['/app/.venv/bin/python', '-m', 'neuralops.worker']
+  otel-collector:
+    <<: *runtime
+    environment:
+      <<: *runtime-env
+      NEURALOPS_RUNTIME: ingest
+    command: ['/app/.venv/bin/uvicorn', 'neuralops.telemetry:app', '--host', '0.0.0.0', '--port', '4318', '--no-access-log', '--limit-concurrency', '32']
+    ports: ['127.0.0.1:4318:4318']
+  web:
+    build: ./web
+    environment:
+      API_INTERNAL_URL: http://api:8000
+    ports: ['127.0.0.1:3000:3000']
+    depends_on:
+      api: {condition: service_started}
+    security_opt: ['no-new-privileges:true']
+    cap_drop: ['ALL']
+    read_only: true
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=32m']
+    mem_limit: 512m
+volumes:
+  postgres-data:
